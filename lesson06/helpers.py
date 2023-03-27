@@ -1,6 +1,5 @@
 from machine import Pin, ADC
 
-
 def init_led(pin, is_on=False):
     led = Pin(pin, Pin.OUT)
     led.value(is_on)
@@ -41,7 +40,7 @@ class PotReader():
     def __init__(self, pot_pin_number, analog_value_range, scaled_value_range,
                  sample_size=1, round_digits=0):
         self._pot_pin = ADC(pot_pin_number)
-        self._round_digits = min(0, round_digits)
+        self._round_digits = max(0, round_digits)
 
         if not is_valid_range(analog_value_range):
             raise ValueError("analog_value_range must contain exactly 2 numbers")
@@ -49,28 +48,40 @@ class PotReader():
         if not is_valid_range(scaled_value_range):
             raise ValueError("scaled_value_range must contain exactly 2 numbers")
 
-        min_analog_value, max_analog_value = min(analog_value_range), max(analog_value_range)
-        min_scaled_value, max_scaled_value = min(scaled_value_range), max(scaled_value_range)
+        min_analog_value, max_analog_value = int(min(analog_value_range)), int(max(analog_value_range))
+        min_scaled_value, max_scaled_value = float(min(scaled_value_range)), float(max(scaled_value_range))
+
+        self._min_scaled_value = min_scaled_value
+        self._max_scaled_value = max_scaled_value
 
         self._scale_formula_slope = (max_scaled_value - min_scaled_value) / (max_analog_value - min_analog_value)
         self._scale_formula_yintercept = min_scaled_value - (self._scale_formula_slope * min_analog_value)
 
-        self._samples = [0 for i in range(min(1, sample_size))]
+        self._samples = [0 for i in range(max(1, sample_size))]
         self._samples_idx = 0
 
     def _scale_analog_value(self, analog_value):
         return self._scale_formula_slope * analog_value + self._scale_formula_yintercept
 
+    def _median(self, values):
+        values = sorted(values)
+        if len(values) % 2 == 1:
+            return values[len(values) // 2]
+        else:
+            lower = values[len(values) // 2 - 1]
+            upper = values[len(values) // 2]
+            return (float(lower + upper)) / 2.0
+        
     def _read_buffered_analog_value(self):
         analog_value = self._pot_pin.read_u16()
         self._samples[self._samples_idx] = analog_value
         self._samples_idx = (self._samples_idx + 1) % len(self._samples)
-        return sum(self._samples) / len(self._samples)
+        return self._median(self._samples) # sum(self._samples) / len(self._samples)
 
     def read(self):
         analog_value = self._read_buffered_analog_value()
         scaled_value = round(self._scale_analog_value(analog_value), self._round_digits)
-        return (scaled_value, analog_value)
+        return (min(self._max_scaled_value, max(self._min_scaled_value, scaled_value)), analog_value)
 
 
 class CancellationToken:
