@@ -22,6 +22,7 @@ color_dict = {
 }
 
 # gamma correction value used to compensate for non-linearility of human vision
+# Based on https://cdn-learn.adafruit.com/downloads/pdf/led-tricks-gamma-correction.pdf
 gamma = 2.8
 
 def convert_rgb_to_analog(rgb, gamma):
