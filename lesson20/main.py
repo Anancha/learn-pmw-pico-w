@@ -81,7 +81,10 @@ class Program:
         self._should_update_display = False
 
     def _serial_print(self, msg):
-        sys.stdout.write("\r                                                                                ")
+        # 20230621: As @keithlohmeyer pointed out, msg:80 fills the remainder
+        # of the 80 characters with blank spaces. There is no need to print a 
+        # blank line to clear the previous message.
+        ##sys.stdout.write("\r                                                                                ")
         sys.stdout.write(f"\r{msg:80}")
 
     def run(self):
