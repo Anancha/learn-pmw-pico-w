@@ -1,15 +1,30 @@
 import sys
 import utime as time
 import dht
+from display import Display
 from machine import Pin
-from lcd1602 import LCD
+
+# https://github.com/jobinpa/mycropython_1602_lcd_library
+from lcd1602 import LCD1602
 
 BTN_TEMP_UNIT_TOGGLE_PIN = 15
 SENSOR_PIN = 16
 
+LCD_RS_PIN = 2
+LCD_E_PIN = 3
+LCD_DB_7_TO_4_PINS = [7, 6, 5, 4]
+LCD_RW_PIN = 1
+
+
 class Program:
-    def __init__(self, btn_temp_unit_toggle_pin, sensor_pin, is_celsius=True,
-                 button_debounce_ms=50, sensor_read_interval_ms=2000):
+    def __init__(
+        self,
+        btn_temp_unit_toggle_pin,
+        sensor_pin,
+        is_celsius=True,
+        button_debounce_ms=100,
+        sensor_read_interval_ms=2000,
+    ):
         # When false, the unit is Fahrenheit.
         self._is_celsius = is_celsius
 
@@ -18,10 +33,10 @@ class Program:
         # the button state in the main loop.
         self._btn_temp_unit_toggle = Pin(btn_temp_unit_toggle_pin, Pin.IN, Pin.PULL_UP)
         self._btn_temp_unit_toggle.irq(trigger=Pin.IRQ_RISING, handler=self._on_btn_cf_deg_toggle_interrupt)
-        self._btn_temp_unit_toggle_ignore_irqs_until = 0  # Timestamp
+        self._btn_temp_unit_toggle_last_event_on = 0  # Timestamp
 
-        # Setup button software debounce. We ignore interrupt request occurring
-        # within the debounce period.
+        # Setup button software debounce. We ignore button events
+        # occurring within the debounce period.
         self._button_debounce_ms = button_debounce_ms
 
         # Setup the DHT11 sensor. We use the DHT11 sensor module from Elegoo.
@@ -29,7 +44,7 @@ class Program:
         # integrated on the module board. No need to activate PIN's internal pull-up.
         # Datasheet: https://download.elegoo.com/?t=Mega_2560_The_Most_Complete_Starter_Kit
         self._sensor = dht.DHT11(Pin(sensor_pin, Pin.IN))
-        self._sensor_next_read_not_before = 0  # Timestamp
+        self._sensor_last_read_on = 0  # Timestamp
         self._sensor_read_interval_ms = sensor_read_interval_ms
         self._sensor_error = None
 
@@ -37,36 +52,32 @@ class Program:
         self._temp_celsius = 0
         self._humidity = 0
 
-        # Indicates whehter the display should be updated
+        # Indicates whether the display should be updated
         self._should_update_display = False
 
         # Not running until run() is called
         self._is_running = False
 
         # Setup the LCD display
-        self._lcd = LCD(pin_e=3, pin_rs=2, pins_db=[7,6,5,4])
+        lcd = LCD1602.begin_4bit(rs=LCD_RS_PIN, e=LCD_E_PIN, db_7_to_4=LCD_DB_7_TO_4_PINS, rw=LCD_RW_PIN)
 
-        # Add degree symbol to LCD custom character map at position 0
+        # Add and map degree symbol to LCD custom character map at position 0
         # The LCD has 8 custom characters, from 0 to 7
         # The following tool can be used to create custom characters
         # https://maxpromer.github.io/LCD-Character-Creator/
-        self._lcd.createChar(chr(176), 0, [
-            0b01110,
-            0b01110,
-            0b01110,
-            0b00000,
-            0b00000,
-            0b00000,
-            0b00000,
-            0b00000
-        ])
+        lcd.create_character(0, [0b01110, 0b01110, 0b01110, 0b00000, 0b00000, 0b00000, 0b00000, 0b00000])
+        lcd.map_character(chr(176), 0)
+
+        self._lcd = Display(lcd)
 
     def _on_btn_cf_deg_toggle_interrupt(self, pin):
         # This code is executed each time the Celsius/Fahrenheit button is pushed.
         # We ignore interrupt requests that occur within the debounce period.
-        if (time.ticks_ms() >= self._btn_temp_unit_toggle_ignore_irqs_until):
+        current_time = time.ticks_ms()
+        elapsed = abs(time.ticks_diff(current_time, self._btn_temp_unit_toggle_last_event_on))
+        if elapsed > self._button_debounce_ms:
             self._is_celsius = not self._is_celsius
-            self._btn_temp_unit_toggle_ignore_irqs_until = time.ticks_ms() + self._button_debounce_ms
+            self._btn_temp_unit_toggle_last_event_on = current_time
             self._should_update_display = True
             self._serial_print(f"Temperature unit changed to {'Celsius' if self._is_celsius else 'Fahrenheit'}")
 
@@ -75,8 +86,9 @@ class Program:
             self._sensor.measure()
             self._sensor_error = None
         except OSError as ex:
-            self._sensor_error = ex
-            self._should_update_display = True
+            if self._sensor_error is None:
+                self._sensor_error = ex
+                self._should_update_display = True
             self._serial_print(f"SENSOR ERROR: {ex}")
             return
 
@@ -90,30 +102,18 @@ class Program:
             self._humidity = humidity
             self._should_update_display = True
 
-    def _refresh_display(self):
-        unit = "C" if self._is_celsius else "F"
-        unit_value = int(round(self._temp_celsius if self._is_celsius else (self._temp_celsius * 9 / 5) + 32))
-
+    def _update_display(self):
         if self._sensor_error:
-            self._lcd_print(0, 0, "SENSOR ERROR!")
-            self._lcd_print(0, 1, str(self._sensor_error))
+            self._lcd.update_sensor_error(self._sensor_error)
         else:
-            self._lcd_print(0, 0, f"Temp: {unit_value}{chr(176)}{unit}")
-            self._lcd_print(0, 1, f"Humidity: {self._humidity}%")
+            unit = "C" if self._is_celsius else "F"
+            unit_value = int(round(self._temp_celsius if self._is_celsius else (self._temp_celsius * 9 / 5) + 32))
+            self._lcd.update_sensor_values(unit_value, unit, self._humidity)
 
         self._should_update_display = False
 
-    def _lcd_print(self, col, row, msg):
-        while len(msg) < self._lcd.numcols:
-            msg += " "
-        
-        if len(msg) > self._lcd.numcols:
-            msg = msg[:self._lcd.numcols]
-        
-        self._lcd.write(col, row, msg)
-
     def _serial_print(self, msg):
-        sys.stdout.write(f'{msg}\n')
+        sys.stdout.write(f"{time.ticks_ms()} {msg}\n")
 
     def run(self):
         if self._is_running:
@@ -124,12 +124,15 @@ class Program:
 
         try:
             while self._is_running:
-                if time.ticks_ms() >= self._sensor_next_read_not_before:
+                current = time.ticks_ms()
+                elapsed_since_last_sensor_read = abs(time.ticks_diff(current, self._sensor_last_read_on))
+                if elapsed_since_last_sensor_read >= self._sensor_read_interval_ms:
                     self._read_sensor()
-                    self._sensor_next_read_not_before = time.ticks_ms() + self._sensor_read_interval_ms
+                    self._sensor_last_read_on = current
 
                 if self._should_update_display:
-                    self._refresh_display()
+                    self._update_display()
+                self._lcd.refresh()
 
                 time.sleep(0.01)
         finally:
